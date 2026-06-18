@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use graph::{
     blockchain::{Block as _, MappingTriggerTrait, TriggerData},
     derive::CheapClone,
-    prelude::{hex, BlockNumber},
-    runtime::{asc_new, gas::GasCounter, AscHeap, AscPtr, HostExportError},
+    prelude::{BlockNumber, hex},
+    runtime::{AscHeap, AscPtr, HostExportError, asc_new, gas::GasCounter},
 };
 use graph_runtime_wasm::module::ToAscPtr;
 use std::{cmp::Ordering, sync::Arc};

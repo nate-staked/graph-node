@@ -2,6 +2,7 @@ mod adapter;
 mod chain;
 pub mod codec;
 mod data_source;
+pub mod rpc;
 mod trigger;
 
 pub use crate::chain::Chain;

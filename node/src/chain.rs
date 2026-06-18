@@ -1,6 +1,8 @@
-use crate::config::{ChainSettings as ConfigChainSettings, Config, ProviderDetails};
+use crate::config::{
+    ChainSettings as ConfigChainSettings, Config, ProviderDetails, Transport as ConfigTransport,
+};
 use crate::network_setup::{
-    AdapterConfiguration, EthAdapterConfig, FirehoseAdapterConfig, Networks,
+    AdapterConfiguration, AztecAdapterConfig, EthAdapterConfig, FirehoseAdapterConfig, Networks,
 };
 use ethereum::ProviderEthRpcMetrics;
 use ethereum::chain::ChainSettings;
@@ -205,6 +207,74 @@ pub async fn create_ethereum_networks(
         });
 
     try_join_all(eth_networks_futures).await
+}
+
+pub async fn create_aztec_networks(
+    logger: Logger,
+    config: &Config,
+    chain_filter: &dyn ChainFilter,
+) -> anyhow::Result<Vec<AdapterConfiguration>> {
+    let futures = config
+        .chains
+        .chains
+        .iter()
+        .filter(|(_, chain)| chain.protocol == BlockchainKind::Aztec)
+        .filter(|(name, _)| chain_filter.filter(name))
+        .map(|(name, chain)| {
+            let logger = logger.cheap_clone();
+            async move {
+                let mut adapters = Vec::new();
+
+                for provider in &chain.providers {
+                    let ProviderDetails::Web3(web3) = &provider.details else {
+                        continue;
+                    };
+
+                    if web3.transport != ConfigTransport::Rpc {
+                        bail!(
+                            "Aztec RPC polling only supports HTTP web3 providers, got {:?}",
+                            web3.transport
+                        );
+                    }
+
+                    let headers = web3
+                        .headers
+                        .iter()
+                        .map(|(name, value)| {
+                            Ok((
+                                name.as_str().to_string(),
+                                value
+                                    .to_str()
+                                    .map_err(|e| anyhow!("invalid header value: {e}"))?
+                                    .to_string(),
+                            ))
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+
+                    info!(
+                        logger,
+                        "Creating Aztec RPC provider";
+                        "url" => &web3.url,
+                        "provider" => &provider.label,
+                        "network" => name,
+                    );
+
+                    adapters.push(graph_chain_aztec::rpc::AztecRpcProvider::new(
+                        provider.label.clone(),
+                        web3.url.clone(),
+                        headers,
+                        chain.settings.json_rpc_timeout,
+                    )?);
+                }
+
+                Ok(AdapterConfiguration::AztecRpc(AztecAdapterConfig {
+                    chain_id: name.as_str().into(),
+                    adapters,
+                }))
+            }
+        });
+
+    try_join_all(futures).await
 }
 
 /// Parses a single Ethereum connection string and returns its network name and `EthereumAdapter`.
@@ -436,11 +506,21 @@ pub async fn networks_as_chains(
             }
             BlockchainKind::Aztec => {
                 let firehose_endpoints = networks.firehose_endpoints(chain_id.clone());
+                let aztec_rpcs = networks.aztec_rpcs(chain_id.clone());
+                let client = if !firehose_endpoints.is_empty() {
+                    ChainClient::<graph_chain_aztec::Chain>::new_firehose(firehose_endpoints)
+                } else {
+                    let rpc = aztec_rpcs.into_iter().next().unwrap_or_else(|| {
+                        panic!("Aztec chain {} has no RPC or Firehose providers", chain_id)
+                    });
+                    ChainClient::<graph_chain_aztec::Chain>::new_rpc(rpc)
+                };
+
                 let chain = graph_chain_aztec::Chain::new(
                     logger_factory.clone(),
                     chain_id.clone(),
                     chain_store.cheap_clone(),
-                    firehose_endpoints,
+                    client,
                     metrics_registry.clone(),
                 );
                 blockchain_map

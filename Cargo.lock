@@ -3992,7 +3992,9 @@ dependencies = [
  "graph-runtime-wasm",
  "prost",
  "prost-types",
+ "reqwest 0.12.23",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

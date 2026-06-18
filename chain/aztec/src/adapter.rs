@@ -4,7 +4,7 @@ use graph::blockchain as bc;
 use graph::prelude::*;
 use prost_types::Any;
 
-use crate::{codec::normalize_hex, data_source::DataSource, Chain};
+use crate::{Chain, codec::normalize_hex, data_source::DataSource};
 
 #[derive(Clone, Debug, Default)]
 pub struct TriggerFilter {

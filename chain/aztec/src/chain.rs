@@ -2,6 +2,9 @@ use async_trait::async_trait;
 use graph::{
     anyhow::Result,
     blockchain::{
+        Block as _, BlockHash, BlockIngestor, BlockPtr, Blockchain, BlockchainKind,
+        EmptyNodeCapabilities, IngestorError, NoopDecoderHook, NoopRuntimeAdapter,
+        RuntimeAdapter as RuntimeAdapterTrait, TriggerFilterWrapper,
         block_stream::{
             BlockStream, BlockStreamBuilder, BlockStreamError, BlockStreamEvent, BlockStreamMapper,
             BlockWithTriggers, FirehoseCursor, FirehoseError,
@@ -10,9 +13,6 @@ use graph::{
         client::ChainClient,
         firehose_block_ingestor::FirehoseBlockIngestor,
         firehose_block_stream::FirehoseBlockStream,
-        Block as _, BlockHash, BlockIngestor, BlockPtr, Blockchain, BlockchainKind,
-        EmptyNodeCapabilities, IngestorError, NoopDecoderHook, NoopRuntimeAdapter,
-        RuntimeAdapter as RuntimeAdapterTrait, TriggerFilterWrapper,
     },
     cheap_clone::CheapClone,
     components::{
@@ -20,11 +20,18 @@ use graph::{
         store::{ChainHeadStore, DeploymentCursorTracker, DeploymentLocator, SourceableStore},
     },
     data::subgraph::UnifiedMappingApiVersion,
-    firehose::{self, FirehoseEndpoint, FirehoseEndpoints, ForkStep},
-    prelude::{o, BlockNumber, Error, Logger, LoggerFactory, MetricsRegistry},
+    firehose::{self, FirehoseEndpoint, ForkStep},
+    futures03::Stream,
+    prelude::{BlockNumber, Error, Logger, LoggerFactory, MetricsRegistry, o},
 };
 use prost::Message;
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use crate::{
     adapter::TriggerFilter,
@@ -32,6 +39,7 @@ use crate::{
     data_source::{
         DataSource, DataSourceTemplate, UnresolvedDataSource, UnresolvedDataSourceTemplate,
     },
+    rpc::AztecRpcProvider,
     trigger::{AztecTrigger, PublicLogTrigger},
 };
 
@@ -55,14 +63,14 @@ impl Chain {
         logger_factory: LoggerFactory,
         name: ChainName,
         chain_head_store: Arc<dyn ChainHeadStore>,
-        firehose_endpoints: FirehoseEndpoints,
+        client: ChainClient<Self>,
         metrics_registry: Arc<MetricsRegistry>,
     ) -> Self {
         Self {
             logger_factory,
             name,
             chain_head_store,
-            client: Arc::new(ChainClient::new_firehose(firehose_endpoints)),
+            client: Arc::new(client),
             metrics_registry,
             block_stream_builder: Arc::new(AztecStreamBuilder {}),
         }
@@ -73,7 +81,7 @@ impl Chain {
 impl Blockchain for Chain {
     const KIND: BlockchainKind = BlockchainKind::Aztec;
 
-    type Client = ();
+    type Client = AztecRpcProvider;
     type Block = codec::Block;
     type DataSource = DataSource;
     type UnresolvedDataSource = UnresolvedDataSource;
@@ -99,21 +107,35 @@ impl Blockchain for Chain {
         deployment: DeploymentLocator,
         store: impl DeploymentCursorTracker,
         start_blocks: Vec<BlockNumber>,
-        _source_subgraph_stores: Vec<Arc<dyn SourceableStore>>,
+        source_subgraph_stores: Vec<Arc<dyn SourceableStore>>,
         filter: Arc<TriggerFilterWrapper<Self>>,
         unified_api_version: UnifiedMappingApiVersion,
     ) -> Result<Box<dyn BlockStream<Self>>, Error> {
-        self.block_stream_builder
-            .build_firehose(
-                self,
-                deployment,
-                store.firehose_cursor(),
-                start_blocks,
-                store.block_ptr(),
-                filter.chain_filter.clone(),
-                unified_api_version,
-            )
-            .await
+        if self.client.is_firehose() {
+            self.block_stream_builder
+                .build_firehose(
+                    self,
+                    deployment,
+                    store.firehose_cursor(),
+                    start_blocks,
+                    store.block_ptr(),
+                    filter.chain_filter.clone(),
+                    unified_api_version,
+                )
+                .await
+        } else {
+            self.block_stream_builder
+                .build_polling(
+                    self,
+                    deployment,
+                    start_blocks,
+                    source_subgraph_stores,
+                    store.block_ptr(),
+                    filter,
+                    unified_api_version,
+                )
+                .await
+        }
     }
 
     async fn chain_head_ptr(&self) -> Result<Option<BlockPtr>, Error> {
@@ -125,12 +147,20 @@ impl Blockchain for Chain {
         logger: &Logger,
         number: BlockNumber,
     ) -> Result<BlockPtr, IngestorError> {
-        let firehose_endpoint = self.client.firehose_endpoint().await?;
+        if self.client.is_firehose() {
+            let firehose_endpoint = self.client.firehose_endpoint().await?;
 
-        firehose_endpoint
-            .block_ptr_for_number::<codec::HeaderOnlyBlock>(logger, number)
-            .await
-            .map_err(Into::into)
+            firehose_endpoint
+                .block_ptr_for_number::<codec::HeaderOnlyBlock>(logger, number)
+                .await
+                .map_err(Into::into)
+        } else {
+            self.client
+                .rpc()?
+                .block_ptr_for_number(number)
+                .await
+                .map_err(Into::into)
+        }
     }
 
     async fn refetch_firehose_block(
@@ -158,14 +188,26 @@ impl Blockchain for Chain {
     }
 
     async fn block_ingestor(&self) -> Result<Box<dyn BlockIngestor>, Error> {
-        let ingestor = FirehoseBlockIngestor::<codec::HeaderOnlyBlock, Self>::new(
-            self.chain_head_store.cheap_clone(),
-            self.chain_client(),
-            self.logger_factory
-                .component_logger("AztecFirehoseBlockIngestor", None),
-            self.name.clone(),
-        );
-        Ok(Box::new(ingestor))
+        if self.client.is_firehose() {
+            let ingestor = FirehoseBlockIngestor::<codec::HeaderOnlyBlock, Self>::new(
+                self.chain_head_store.cheap_clone(),
+                self.chain_client(),
+                self.logger_factory
+                    .component_logger("AztecFirehoseBlockIngestor", None),
+                self.name.clone(),
+            );
+            Ok(Box::new(ingestor))
+        } else {
+            Ok(Box::new(RpcBlockIngestor {
+                logger: self
+                    .logger_factory
+                    .component_logger("AztecRpcBlockIngestor", None),
+                name: self.name.clone(),
+                chain_head_store: self.chain_head_store.cheap_clone(),
+                rpc: self.client.rpc()?.clone(),
+                polling_interval: Duration::from_secs(2),
+            }))
+        }
     }
 }
 
@@ -210,15 +252,40 @@ impl BlockStreamBuilder<Chain> for AztecStreamBuilder {
 
     async fn build_polling(
         &self,
-        _chain: &Chain,
-        _deployment: DeploymentLocator,
-        _start_blocks: Vec<BlockNumber>,
+        chain: &Chain,
+        deployment: DeploymentLocator,
+        start_blocks: Vec<BlockNumber>,
         _source_subgraph_stores: Vec<Arc<dyn SourceableStore>>,
-        _subgraph_current_block: Option<BlockPtr>,
-        _filter: Arc<TriggerFilterWrapper<Chain>>,
-        _unified_api_version: UnifiedMappingApiVersion,
+        subgraph_current_block: Option<BlockPtr>,
+        filter: Arc<TriggerFilterWrapper<Chain>>,
+        unified_api_version: UnifiedMappingApiVersion,
     ) -> Result<Box<dyn BlockStream<Chain>>> {
-        unimplemented!("Aztec RPC polling is not implemented in this POC")
+        let adapter = chain.triggers_adapter(
+            &deployment,
+            &EmptyNodeCapabilities::default(),
+            unified_api_version,
+        )?;
+
+        let logger = chain
+            .logger_factory
+            .subgraph_logger(&deployment)
+            .new(o!("component" => "AztecRpcPollingBlockStream"));
+
+        let start_block = subgraph_current_block
+            .as_ref()
+            .map(|ptr| ptr.number.saturating_add(1))
+            .or_else(|| start_blocks.into_iter().min())
+            .unwrap_or(0);
+
+        Ok(Box::new(RpcPollingBlockStream::new(
+            chain.client.rpc()?.clone(),
+            adapter,
+            filter.chain_filter.clone(),
+            logger,
+            start_block,
+            subgraph_current_block,
+            Duration::from_secs(2),
+        )))
     }
 }
 
@@ -297,6 +364,156 @@ impl TriggersAdapterTrait<Chain> for TriggersAdapter {
     }
 }
 
+pub struct RpcPollingBlockStream {
+    inner: Pin<Box<dyn Stream<Item = Result<BlockStreamEvent<Chain>, BlockStreamError>> + Send>>,
+}
+
+impl RpcPollingBlockStream {
+    fn new(
+        rpc: AztecRpcProvider,
+        adapter: Arc<dyn TriggersAdapterTrait<Chain>>,
+        filter: Arc<TriggerFilter>,
+        logger: Logger,
+        next_block: BlockNumber,
+        current_block: Option<BlockPtr>,
+        polling_interval: Duration,
+    ) -> Self {
+        let state = RpcPollingState {
+            rpc,
+            adapter,
+            filter,
+            logger,
+            next_block,
+            current_block,
+            polling_interval,
+        };
+
+        Self {
+            inner: Box::pin(graph::futures03::stream::unfold(
+                state,
+                |mut state| async move {
+                    loop {
+                        match state.next_event().await {
+                            Ok(Some(event)) => return Some((Ok(event), state)),
+                            Ok(None) => tokio::time::sleep(state.polling_interval).await,
+                            Err(err) => return Some((Err(BlockStreamError::from(err)), state)),
+                        }
+                    }
+                },
+            )),
+        }
+    }
+}
+
+impl BlockStream<Chain> for RpcPollingBlockStream {
+    fn buffer_size_hint(&self) -> usize {
+        1
+    }
+}
+
+impl Stream for RpcPollingBlockStream {
+    type Item = Result<BlockStreamEvent<Chain>, BlockStreamError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+struct RpcPollingState {
+    rpc: AztecRpcProvider,
+    adapter: Arc<dyn TriggersAdapterTrait<Chain>>,
+    filter: Arc<TriggerFilter>,
+    logger: Logger,
+    next_block: BlockNumber,
+    current_block: Option<BlockPtr>,
+    polling_interval: Duration,
+}
+
+impl RpcPollingState {
+    async fn next_event(&mut self) -> Result<Option<BlockStreamEvent<Chain>>, Error> {
+        let latest = self.rpc.latest_block_number().await?;
+        if self.next_block > latest {
+            return Ok(None);
+        }
+
+        let block = self.rpc.block_by_number(self.next_block).await?;
+        let parent_ptr = block.parent_ptr();
+
+        if let (Some(current), Some(parent)) = (&self.current_block, parent_ptr.as_ref()) {
+            if current != parent {
+                self.current_block = Some(parent.clone());
+                self.next_block = parent.number.saturating_add(1);
+                return Ok(Some(BlockStreamEvent::Revert(
+                    parent.clone(),
+                    FirehoseCursor::None,
+                )));
+            }
+        }
+
+        self.next_block = block.number().saturating_add(1);
+        self.current_block = Some(block.ptr());
+
+        let block_with_triggers = self
+            .adapter
+            .triggers_in_block(&self.logger, block, self.filter.as_ref())
+            .await?;
+
+        Ok(Some(BlockStreamEvent::ProcessBlock(
+            block_with_triggers,
+            FirehoseCursor::None,
+        )))
+    }
+}
+
+pub struct RpcBlockIngestor {
+    logger: Logger,
+    name: ChainName,
+    chain_head_store: Arc<dyn ChainHeadStore>,
+    rpc: AztecRpcProvider,
+    polling_interval: Duration,
+}
+
+#[async_trait]
+impl BlockIngestor for RpcBlockIngestor {
+    async fn run(self: Box<Self>) {
+        loop {
+            match self.ingest_latest_block().await {
+                Ok(()) => {}
+                Err(err) => {
+                    graph::slog::warn!(
+                        self.logger,
+                        "Aztec RPC block ingestor failed";
+                        "network" => self.name.to_string(),
+                        "error" => err.to_string(),
+                    );
+                }
+            }
+
+            tokio::time::sleep(self.polling_interval).await;
+        }
+    }
+
+    fn network_name(&self) -> ChainName {
+        self.name.clone()
+    }
+
+    fn kind(&self) -> BlockchainKind {
+        BlockchainKind::Aztec
+    }
+}
+
+impl RpcBlockIngestor {
+    async fn ingest_latest_block(&self) -> Result<(), Error> {
+        let latest = self.rpc.latest_block_number().await?;
+        let block = Arc::new(self.rpc.block_by_number(latest).await?);
+
+        self.chain_head_store
+            .cheap_clone()
+            .set_chain_head(block, latest.to_string())
+            .await
+    }
+}
+
 pub struct FirehoseMapper {
     adapter: Arc<dyn TriggersAdapterTrait<Chain>>,
     filter: Arc<TriggerFilter>,
@@ -314,7 +531,7 @@ impl BlockStreamMapper<Chain> for FirehoseMapper {
                 return Err(anyhow::anyhow!(
                     "Aztec mapper expected every Firehose response to include a block"
                 )
-                .into())
+                .into());
             }
         };
 

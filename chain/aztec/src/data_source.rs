@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use graph::{
-    anyhow::{anyhow, Context, Error},
+    anyhow::{Context, Error, anyhow},
     blockchain::{self, Block as _, Blockchain, TriggerWithHandler},
     cheap_clone::CheapClone,
     components::{
@@ -15,9 +15,9 @@ use graph::{
 use std::{collections::HashSet, sync::Arc};
 
 use crate::{
+    Chain,
     codec::normalize_hex,
     trigger::{AztecTrigger, PublicLogTrigger},
-    Chain,
 };
 
 pub const AZTEC_KIND: &str = "aztec";

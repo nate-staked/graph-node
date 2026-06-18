@@ -32,7 +32,7 @@ use graph_store_postgres::{BlockStore, ChainHeadUpdateListener};
 use std::{any::Any, cmp::Ordering, sync::Arc};
 
 use crate::chain::{
-    AnyChainFilter, ChainFilter, OneChainFilter, create_ethereum_networks,
+    AnyChainFilter, ChainFilter, OneChainFilter, create_aztec_networks, create_ethereum_networks,
     create_firehose_networks, networks_as_chains,
 };
 
@@ -52,9 +52,16 @@ pub struct FirehoseAdapterConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct AztecAdapterConfig {
+    pub chain_id: ChainName,
+    pub adapters: Vec<graph_chain_aztec::rpc::AztecRpcProvider>,
+}
+
+#[derive(Debug, Clone)]
 pub enum AdapterConfiguration {
     Rpc(EthAdapterConfig),
     Firehose(FirehoseAdapterConfig),
+    AztecRpc(AztecAdapterConfig),
 }
 
 impl AdapterConfiguration {
@@ -62,12 +69,14 @@ impl AdapterConfiguration {
         match self {
             AdapterConfiguration::Rpc(_) => &BlockchainKind::Ethereum,
             AdapterConfiguration::Firehose(fh) => &fh.kind,
+            AdapterConfiguration::AztecRpc(_) => &BlockchainKind::Aztec,
         }
     }
     pub fn chain_id(&self) -> &ChainName {
         match self {
             AdapterConfiguration::Rpc(EthAdapterConfig { chain_id, .. })
-            | AdapterConfiguration::Firehose(FirehoseAdapterConfig { chain_id, .. }) => chain_id,
+            | AdapterConfiguration::Firehose(FirehoseAdapterConfig { chain_id, .. })
+            | AdapterConfiguration::AztecRpc(AztecAdapterConfig { chain_id, .. }) => chain_id,
         }
     }
 
@@ -85,6 +94,13 @@ impl AdapterConfiguration {
         }
     }
 
+    pub fn as_aztec_rpc(&self) -> Option<&AztecAdapterConfig> {
+        match self {
+            AdapterConfiguration::AztecRpc(rpc) => Some(rpc),
+            _ => None,
+        }
+    }
+
     pub fn is_firehose(&self) -> bool {
         self.as_firehose().is_none()
     }
@@ -93,6 +109,7 @@ impl AdapterConfiguration {
 pub struct Networks {
     pub adapters: Vec<AdapterConfiguration>,
     pub rpc_provider_manager: ProviderManager<EthereumNetworkAdapter>,
+    pub aztec_rpc_provider_manager: ProviderManager<graph_chain_aztec::rpc::AztecRpcProvider>,
     pub firehose_provider_manager: ProviderManager<Arc<FirehoseEndpoint>>,
 }
 
@@ -102,6 +119,11 @@ impl Networks {
         Self {
             adapters: vec![],
             rpc_provider_manager: ProviderManager::new(
+                Logger::root(Discard, o!()),
+                vec![],
+                ProviderCheckStrategy::MarkAsValid,
+            ),
+            aztec_rpc_provider_manager: ProviderManager::new(
                 Logger::root(Discard, o!()),
                 vec![],
                 ProviderCheckStrategy::MarkAsValid,
@@ -147,6 +169,14 @@ impl Networks {
         get_identifier(self.rpc_provider_manager.clone(), logger, chain_id, "rpc")
             .or_else(|_| {
                 get_identifier(
+                    self.aztec_rpc_provider_manager.clone(),
+                    logger,
+                    chain_id,
+                    "aztec-rpc",
+                )
+            })
+            .or_else(|_| {
+                get_identifier(
                     self.firehose_provider_manager.clone(),
                     logger,
                     chain_id,
@@ -182,7 +212,8 @@ impl Networks {
             endpoint_metrics.cheap_clone(),
             chain_filter,
         );
-        let adapters: Vec<_> = eth.into_iter().chain(firehose).collect();
+        let aztec = create_aztec_networks(logger.cheap_clone(), config, chain_filter).await?;
+        let adapters: Vec<_> = eth.into_iter().chain(firehose).chain(aztec).collect();
 
         Ok(Networks::new(&logger, adapters, provider_checks))
     }
@@ -261,11 +292,23 @@ impl Networks {
             )
             .collect_vec();
 
+        let aztec_adapters = adapters
+            .iter()
+            .flat_map(|a| a.as_aztec_rpc())
+            .cloned()
+            .map(|AztecAdapterConfig { chain_id, adapters }| (chain_id, adapters))
+            .collect_vec();
+
         Self {
             adapters: adapters2,
             rpc_provider_manager: ProviderManager::new(
                 logger.clone(),
                 eth_adapters,
+                ProviderCheckStrategy::RequireAll(provider_checks),
+            ),
+            aztec_rpc_provider_manager: ProviderManager::new(
+                logger.clone(),
+                aztec_adapters,
                 ProviderCheckStrategy::RequireAll(provider_checks),
             ),
             firehose_provider_manager: ProviderManager::new(
@@ -372,5 +415,14 @@ impl Networks {
             eth_adapters,
             None,
         )
+    }
+
+    pub fn aztec_rpcs(&self, chain_id: ChainName) -> Vec<graph_chain_aztec::rpc::AztecRpcProvider> {
+        self.adapters
+            .iter()
+            .filter(|a| a.chain_id().eq(&chain_id))
+            .flat_map(|a| a.as_aztec_rpc())
+            .flat_map(|rpc| rpc.adapters.clone())
+            .collect_vec()
     }
 }

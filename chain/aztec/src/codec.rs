@@ -1,6 +1,6 @@
 use graph::{
     blockchain::{Block as BlockchainBlock, BlockPtr, BlockTime},
-    prelude::{alloy::primitives::B256, hex, BlockNumber},
+    prelude::{BlockNumber, alloy::primitives::B256, hex},
 };
 use prost::Message;
 use std::convert::TryFrom;
