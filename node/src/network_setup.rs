@@ -318,6 +318,9 @@ impl Networks {
                 BlockchainKind::Near => {
                     block_ingestor::<graph_chain_near::Chain>(logger, id, chain, &mut res).await?
                 }
+                BlockchainKind::Aztec => {
+                    block_ingestor::<graph_chain_aztec::Chain>(logger, id, chain, &mut res).await?
+                }
             }
         }
 

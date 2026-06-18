@@ -122,6 +122,21 @@ where
 
                         self.start_subgraph_inner(logger, loc, runner).await
                     }
+                    BlockchainKind::Aztec => {
+                        let runner = instance_manager
+                            .build_subgraph_runner::<graph_chain_aztec::Chain>(
+                                logger.clone(),
+                                self.env_vars.cheap_clone(),
+                                loc.clone(),
+                                raw_manifest,
+                                stop_block,
+                                Box::new(SubgraphTriggerProcessor {}),
+                                deployment_status_metric,
+                            )
+                            .await?;
+
+                        self.start_subgraph_inner(logger, loc, runner).await
+                    }
                 }
             }
         };

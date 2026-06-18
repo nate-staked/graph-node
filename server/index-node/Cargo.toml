@@ -8,6 +8,7 @@ async-trait = { workspace = true }
 blake3 = "1.8"
 graph = { path = "../../graph" }
 graph-graphql = { path = "../../graphql" }
+graph-chain-aztec = { path = "../../chain/aztec" }
 graph-chain-ethereum = { path = "../../chain/ethereum" }
 graph-chain-near = { path = "../../chain/near" }
 git-testament = { workspace = true }

@@ -342,6 +342,26 @@ where
                 )
                 .await?
             }
+            BlockchainKind::Aztec => {
+                create_subgraph_version::<graph_chain_aztec::Chain, _, _>(
+                    &logger,
+                    self.store.clone(),
+                    self.chains.cheap_clone(),
+                    name.clone(),
+                    hash.cheap_clone(),
+                    start_block_override,
+                    graft_block_override,
+                    raw,
+                    node_id,
+                    debug_fork,
+                    self.version_switching_mode,
+                    &resolver,
+                    self.amp_client.cheap_clone(),
+                    history_blocks,
+                    &self.amp_chain_names,
+                )
+                .await?
+            }
         };
 
         debug!(

@@ -561,6 +561,9 @@ pub enum BlockchainKind {
 
     /// NEAR chains (Mainnet, Testnet) or chains that are compatible
     Near,
+
+    /// Aztec L2 chains.
+    Aztec,
 }
 
 impl fmt::Display for BlockchainKind {
@@ -568,6 +571,7 @@ impl fmt::Display for BlockchainKind {
         let value = match self {
             BlockchainKind::Ethereum => "ethereum",
             BlockchainKind::Near => "near",
+            BlockchainKind::Aztec => "aztec",
         };
         write!(f, "{}", value)
     }
@@ -580,6 +584,7 @@ impl FromStr for BlockchainKind {
         match s {
             "ethereum" => Ok(BlockchainKind::Ethereum),
             "near" => Ok(BlockchainKind::Near),
+            "aztec" => Ok(BlockchainKind::Aztec),
             "subgraph" => Ok(BlockchainKind::Ethereum), // TODO(krishna): We should detect the blockchain kind from the source subgraph
             "amp" => Ok(BlockchainKind::Ethereum),      // TODO: Maybe get this from the Amp server
             _ => Err(anyhow!("unknown blockchain kind {}", s)),

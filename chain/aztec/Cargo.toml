@@ -1,0 +1,16 @@
+[package]
+name = "graph-chain-aztec"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+graph = { path = "../../graph" }
+graph-runtime-wasm = { path = "../../runtime/wasm" }
+prost = { workspace = true }
+prost-types = { workspace = true }
+serde = { workspace = true }
+anyhow = "1"
+
+[dev-dependencies]
+tokio = { workspace = true }

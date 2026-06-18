@@ -573,6 +573,24 @@ where
                 )
                 .await?
             }
+            BlockchainKind::Aztec => {
+                let unvalidated_subgraph_manifest =
+                    UnvalidatedSubgraphManifest::<graph_chain_aztec::Chain>::resolve(
+                        deployment_hash.clone(),
+                        raw_yaml,
+                        &self.link_resolver,
+                        self.amp_client.cheap_clone(),
+                        &self.logger,
+                        max_spec_version,
+                    )
+                    .await?;
+
+                Self::validate_and_extract_features(
+                    &self.store.subgraph_store(),
+                    unvalidated_subgraph_manifest,
+                )
+                .await?
+            }
         };
 
         Ok(result)
@@ -680,6 +698,7 @@ where
         // so this seems like the next best thing.
         try_resolve_for_chain!(graph_chain_ethereum::Chain);
         try_resolve_for_chain!(graph_chain_near::Chain);
+        try_resolve_for_chain!(graph_chain_aztec::Chain);
 
         // If you're adding support for a new chain and this `match` clause just
         // gave you a compiler error, then this message is for you! You need to
@@ -687,7 +706,7 @@ where
         // type.
         match BlockchainKind::Ethereum {
             // Note: we don't actually care about substreams here.
-            BlockchainKind::Ethereum | BlockchainKind::Near => (),
+            BlockchainKind::Ethereum | BlockchainKind::Near | BlockchainKind::Aztec => (),
         }
 
         // The given network does not exist.

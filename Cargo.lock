@@ -3983,6 +3983,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "graph-chain-aztec"
+version = "0.42.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "graph",
+ "graph-runtime-wasm",
+ "prost",
+ "prost-types",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "graph-chain-common"
 version = "0.44.0"
 dependencies = [
@@ -4047,6 +4061,7 @@ dependencies = [
  "chrono",
  "futures 0.3.31",
  "graph",
+ "graph-chain-aztec",
  "graph-chain-ethereum",
  "graph-chain-near",
  "graph-runtime-wasm",
@@ -4094,6 +4109,7 @@ dependencies = [
  "env_logger",
  "git-testament",
  "graph",
+ "graph-chain-aztec",
  "graph-chain-ethereum",
  "graph-chain-near",
  "graph-core",
@@ -4177,6 +4193,7 @@ dependencies = [
  "blake3 1.8.5",
  "git-testament",
  "graph",
+ "graph-chain-aztec",
  "graph-chain-ethereum",
  "graph-chain-near",
  "graph-graphql",

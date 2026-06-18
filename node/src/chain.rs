@@ -434,6 +434,18 @@ pub async fn networks_as_chains(
                 );
                 blockchain_map.insert::<graph_chain_near::Chain>(chain_id.clone(), Arc::new(chain));
             }
+            BlockchainKind::Aztec => {
+                let firehose_endpoints = networks.firehose_endpoints(chain_id.clone());
+                let chain = graph_chain_aztec::Chain::new(
+                    logger_factory.clone(),
+                    chain_id.clone(),
+                    chain_store.cheap_clone(),
+                    firehose_endpoints,
+                    metrics_registry.clone(),
+                );
+                blockchain_map
+                    .insert::<graph_chain_aztec::Chain>(chain_id.clone(), Arc::new(chain));
+            }
         }
     }
 }
